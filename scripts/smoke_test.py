@@ -8,6 +8,7 @@ Run after `docker compose up -d` and `alembic upgrade head`:
 """
 from __future__ import annotations
 
+import json
 import sys
 import uuid
 
@@ -18,7 +19,11 @@ from app.config import settings
 from app.db.audit import AuditChainHead, AuditLog, genesis_hash, verify_chain
 from app.db.session import tenant_session_cm
 from app.models.customer import Customer
+from app.models.identity_verification import IdentityVerification
 from app.models.tenant import Tenant
+from app.schemas.identity_verification import IdentityVerificationCreate
+from app.services import identity_service
+from app.services.identity.providers.mock import MockIdentityProvider
 
 migrations_engine = create_engine(settings.database_url_migrations)
 
@@ -107,6 +112,79 @@ def main() -> int:
         not result_after.valid and result_after.failed_at_seq == tampered_seq,
         f"got valid={result_after.valid}, failed_at_seq={result_after.failed_at_seq}",
     )
+
+    # 8. Identity verification: "verified" path, as Tenant A, against the
+    # customer from step 2.
+    sample_bvn = "22233344455"
+    with tenant_session_cm(tenant_a) as db_a4:
+        verified_record = identity_service.create_identity_verification(
+            db_a4, tenant_a, customer_id,
+            IdentityVerificationCreate(identifier_type="BVN", identifier=sample_bvn),
+        )
+        verified_id, verified_hash = verified_record.id, verified_record.identifier_hash
+    check(
+        "mock provider 'verified' path persists a matched record",
+        verified_record.status == "verified" and verified_record.matched is True
+        and verified_record.identifier_last4 == sample_bvn[-4:]
+        and set(verified_record.profile_data) >= {"full_name", "date_of_birth", "phone_number"},
+    )
+
+    # 9. Mock provider determinism: same identifier always yields the same
+    # fake profile.
+    provider = MockIdentityProvider()
+    r1, r2 = provider.verify_bvn(sample_bvn), provider.verify_bvn(sample_bvn)
+    check(
+        "mock provider is deterministic for the same identifier",
+        r1.profile == r2.profile and r1.provider_reference == r2.provider_reference,
+    )
+
+    # 10. "no_match" path (reserved test value: 11 zeros).
+    with tenant_session_cm(tenant_a) as db_a5:
+        no_match = identity_service.create_identity_verification(
+            db_a5, tenant_a, customer_id,
+            IdentityVerificationCreate(identifier_type="BVN", identifier="0" * 11),
+        )
+    check("mock provider 'no_match' path", no_match.status == "no_match" and no_match.matched is False)
+
+    # 11. "error" path (reserved test value: 11 nines).
+    with tenant_session_cm(tenant_a) as db_a6:
+        error_rec = identity_service.create_identity_verification(
+            db_a6, tenant_a, customer_id,
+            IdentityVerificationCreate(identifier_type="BVN", identifier="9" * 11),
+        )
+    check(
+        "mock provider 'error' path",
+        error_rec.status == "error" and error_rec.matched is False and bool(error_rec.error_detail),
+    )
+
+    # 12. The property that matters most: the raw BVN must appear nowhere
+    # persisted -- not in profile_data, and not in the audit_log snapshot of
+    # this row (the whole reason identifier_hash/last4 exist instead of the
+    # raw value). The HMAC hash, on the other hand, should be present.
+    check(
+        "raw identifier absent from persisted profile_data",
+        sample_bvn not in json.dumps(verified_record.profile_data),
+    )
+    with Session(migrations_engine) as db:
+        audit_rows = db.execute(
+            select(AuditLog).where(
+                AuditLog.tenant_id == tenant_a,
+                AuditLog.table_name == "identity_verifications",
+                AuditLog.record_id == verified_id,
+            )
+        ).scalars().all()
+    check("identity_verifications insert was captured in audit_log", len(audit_rows) == 1)
+    dumped = json.dumps([r.new_values for r in audit_rows])
+    check("raw identifier absent from audit_log for this record", sample_bvn not in dumped)
+    check("audit_log captured the hash instead", verified_hash in dumped)
+
+    # 13. Cross-tenant isolation applies to identity_verifications too.
+    with tenant_session_cm(tenant_b) as db_b2:
+        rows_b_iv = db_b2.execute(select(IdentityVerification)).scalars().all()
+    check("tenant B sees zero of tenant A's identity verifications", len(rows_b_iv) == 0)
+    with tenant_session_cm(tenant_a) as db_a7:
+        rows_a_iv = db_a7.execute(select(IdentityVerification)).scalars().all()
+    check("tenant A sees its own identity verifications", len(rows_a_iv) == 3)
 
     print()
     if failures:

@@ -8,6 +8,7 @@ from app.db.base import Base
 import app.models.tenant  # noqa: F401 -- register models on Base.metadata
 import app.models.customer  # noqa: F401
 import app.models.transaction  # noqa: F401
+import app.models.identity_verification  # noqa: F401
 import app.db.audit  # noqa: F401
 
 config = context.config

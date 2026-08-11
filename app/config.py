@@ -18,5 +18,16 @@ class Settings(BaseSettings):
 
     app_db_password: str = "app_user_dev_password"
 
+    # Identity & Verification module (BVN/NIN). "mock" needs no credentials;
+    # a real provider is a new adapter class in app/services/identity/providers/
+    # plus one entry in app/services/identity/factory.py -- nothing else changes.
+    identity_provider: str = "mock"
+
+    # HMAC key for IdentityVerification.identifier_hash (see
+    # app/services/identity_service.py:hash_identifier). This is what stops
+    # the hash column from being brute-forceable from a DB/audit_log dump --
+    # MUST be overridden via env var outside local dev.
+    identity_hash_pepper: str = "dev-only-change-me-in-prod"
+
 
 settings = Settings()

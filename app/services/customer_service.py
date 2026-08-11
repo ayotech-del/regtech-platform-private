@@ -21,3 +21,10 @@ def list_customers(db: Session) -> list[Customer]:
     # future call site forgets to filter, because the database won't return
     # another tenant's rows regardless of what this function does.
     return list(db.execute(select(Customer)).scalars().all())
+
+
+def get_customer(db: Session, customer_id: uuid.UUID) -> Customer | None:
+    # db.get() runs inside the tenant-pinned session, so RLS transparently
+    # returns None for a customer belonging to another tenant -- this is a
+    # tenant-membership check for free, not a manual tenant_id comparison.
+    return db.get(Customer, customer_id)
