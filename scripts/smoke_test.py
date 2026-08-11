@@ -20,9 +20,11 @@ from app.db.audit import AuditChainHead, AuditLog, genesis_hash, verify_chain
 from app.db.session import tenant_session_cm
 from app.models.customer import Customer
 from app.models.identity_verification import IdentityVerification
+from app.models.sanctions_screening import SanctionsScreening
 from app.models.tenant import Tenant
 from app.schemas.identity_verification import IdentityVerificationCreate
-from app.services import identity_service
+from app.schemas.sanctions_screening import SanctionsScreeningCreate
+from app.services import identity_service, sanctions_service
 from app.services.identity.providers.mock import MockIdentityProvider
 
 migrations_engine = create_engine(settings.database_url_migrations)
@@ -185,6 +187,66 @@ def main() -> int:
     with tenant_session_cm(tenant_a) as db_a7:
         rows_a_iv = db_a7.execute(select(IdentityVerification)).scalars().all()
     check("tenant A sees its own identity verifications", len(rows_a_iv) == 3)
+
+    # 14. Sanctions screening: "clear" path against a name unrelated to the
+    # mock's embedded watchlist.
+    with tenant_session_cm(tenant_a) as db_a8:
+        clear_rec = sanctions_service.create_sanctions_screening(
+            db_a8, tenant_a, customer_id, "Ada Okafor",
+            SanctionsScreeningCreate(name_override="Zephyrine Quokkafield Bramblewood"),
+        )
+    check(
+        "sanctions screening 'clear' path",
+        clear_rec.status == "clear" and clear_rec.hits == [] and clear_rec.highest_score is not None
+        and clear_rec.highest_score < settings.sanctions_match_threshold,
+    )
+
+    # 15. Sanctions screening: "potential_match" path against a name close
+    # to an embedded watchlist entry.
+    with tenant_session_cm(tenant_a) as db_a9:
+        match_rec = sanctions_service.create_sanctions_screening(
+            db_a9, tenant_a, customer_id, "Ada Okafor",
+            SanctionsScreeningCreate(name_override="Boris Yevgenyevich Volkoff"),
+        )
+        match_id = match_rec.id
+    check(
+        "sanctions screening 'potential_match' path",
+        match_rec.status == "potential_match"
+        and match_rec.highest_score is not None
+        and match_rec.highest_score >= settings.sanctions_match_threshold
+        and any(h["matched_name"] == "Boris Yevgenyevich Volkov" and h["list_name"] == "OFAC-SDN" for h in match_rec.hits),
+    )
+
+    # 16. "error" path (reserved sentinel input).
+    with tenant_session_cm(tenant_a) as db_a10:
+        error_scr = sanctions_service.create_sanctions_screening(
+            db_a10, tenant_a, customer_id, "Ada Okafor",
+            SanctionsScreeningCreate(name_override="Trigger Sanctions Provider Error"),
+        )
+    check(
+        "sanctions screening 'error' path",
+        error_scr.status == "error" and error_scr.hits == [] and error_scr.highest_score is None
+        and bool(error_scr.error_detail),
+    )
+
+    # 17. The screening record is captured in audit_log.
+    with Session(migrations_engine) as db:
+        audit_rows_ss = db.execute(
+            select(AuditLog).where(
+                AuditLog.tenant_id == tenant_a,
+                AuditLog.table_name == "sanctions_screenings",
+                AuditLog.record_id == match_id,
+            )
+        ).scalars().all()
+    check("sanctions_screenings insert was captured in audit_log", len(audit_rows_ss) == 1)
+
+    # 18. Cross-tenant isolation applies to sanctions_screenings too.
+    with tenant_session_cm(tenant_b) as db_b3:
+        rows_b_ss = db_b3.execute(select(SanctionsScreening)).scalars().all()
+    check("tenant B sees zero of tenant A's sanctions screenings", len(rows_b_ss) == 0)
+    with tenant_session_cm(tenant_a) as db_a11:
+        rows_a_ss = db_a11.execute(select(SanctionsScreening)).scalars().all()
+    check("tenant A sees its own sanctions screenings", len(rows_a_ss) == 3)
 
     print()
     if failures:

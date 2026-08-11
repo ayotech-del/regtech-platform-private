@@ -29,5 +29,21 @@ class Settings(BaseSettings):
     # MUST be overridden via env var outside local dev.
     identity_hash_pepper: str = "dev-only-change-me-in-prod"
 
+    # Sanctions & Watchlist Screening module. "mock" needs no credentials; a
+    # real provider (ComplyAdvantage, Refinitiv World-Check, Dow Jones,
+    # LSEG) is a new adapter class in app/services/watchlist/providers/ plus
+    # one entry in app/services/watchlist/factory.py -- nothing else changes.
+    watchlist_provider: str = "mock"
+
+    # Minimum similarity score (0-100) for a candidate to count as a hit.
+    # 70 is a conservative default for name-fuzzy-matching: same-length
+    # names differing only by a transliteration/spelling variant or an
+    # inserted middle name typically score well above 70, while unrelated
+    # names of similar length rarely clear it (see MockWatchlistProvider).
+    # This is illustrative for the mock adapter, not a regulatory-grade
+    # threshold -- override via env var, and expect a real provider
+    # integration to use its own vendor-defined confidence bands instead.
+    sanctions_match_threshold: float = 70.0
+
 
 settings = Settings()
