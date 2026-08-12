@@ -13,6 +13,7 @@ import sys
 import uuid
 
 from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
@@ -578,16 +579,23 @@ def main() -> int:
     check("authenticate rejects a bogus key", bogus is None)
 
     # 41. get_current_tenant is the actual FastAPI dependency -- calling it
-    # directly with an explicit `authorization` kwarg is exactly what
-    # FastAPI does under the hood, just without the HTTP round trip. Proves
-    # actor_id/actor_type now flow from the key instead of always None/"user".
-    ctx = get_current_tenant(authorization=f"Bearer {raw_key}")
+    # directly with an explicit `credentials` kwarg is exactly what FastAPI
+    # does under the hood (via the HTTPBearer security scheme), just
+    # without the HTTP round trip. Proves actor_id/actor_type now flow from
+    # the key instead of always None/"user".
+    def _creds(raw: str) -> HTTPAuthorizationCredentials:
+        return HTTPAuthorizationCredentials(scheme="Bearer", credentials=raw)
+
+    ctx = get_current_tenant(credentials=_creds(raw_key))
     check(
         "get_current_tenant resolves tenant + actor from a valid key",
         ctx.tenant_id == tenant_a and ctx.actor_id == api_key_id and ctx.actor_type == "api_key",
     )
 
-    # 42. get_current_tenant rejects missing/malformed headers and unknown keys.
+    # 42. get_current_tenant rejects a missing credential and an unknown key.
+    # (HTTPBearer itself, with auto_error=False, normalizes a missing or
+    # non-Bearer Authorization header to credentials=None before
+    # get_current_tenant ever runs -- that's the case being simulated here.)
     def _rejects_with_401(**kwargs) -> bool:
         try:
             get_current_tenant(**kwargs)
@@ -596,12 +604,12 @@ def main() -> int:
         return False
 
     check(
-        "get_current_tenant rejects a malformed Authorization header",
-        _rejects_with_401(authorization="not-bearer-at-all"),
+        "get_current_tenant rejects a missing/malformed credential",
+        _rejects_with_401(credentials=None),
     )
     check(
         "get_current_tenant rejects an unknown key",
-        _rejects_with_401(authorization="Bearer rtk_totally-made-up"),
+        _rejects_with_401(credentials=_creds("rtk_totally-made-up")),
     )
 
     # 43. Revoking a key blocks both authenticate() and get_current_tenant.
@@ -613,7 +621,7 @@ def main() -> int:
     check("authenticate rejects a revoked key", revoked_lookup is None)
     check(
         "get_current_tenant rejects a revoked key",
-        _rejects_with_401(authorization=f"Bearer {raw_key}"),
+        _rejects_with_401(credentials=_creds(raw_key)),
     )
 
     # 44. Cross-tenant key isolation: a tenant B key must not authenticate
