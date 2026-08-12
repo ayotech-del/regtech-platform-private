@@ -22,6 +22,7 @@ from app.models.case import Case
 from app.models.case_note import CaseNote
 from app.models.customer import Customer
 from app.models.identity_verification import IdentityVerification
+from app.models.report import Report
 from app.models.sanctions_screening import SanctionsScreening
 from app.models.tenant import Tenant
 from app.models.transaction_alert import TransactionAlert
@@ -29,7 +30,7 @@ from app.schemas.case import CaseNoteCreate, CaseUpdate
 from app.schemas.identity_verification import IdentityVerificationCreate
 from app.schemas.sanctions_screening import SanctionsScreeningCreate
 from app.schemas.transaction import TransactionCreate
-from app.services import case_service, identity_service, sanctions_service, transaction_service
+from app.services import case_service, identity_service, report_service, sanctions_service, transaction_service
 from app.services.identity.providers.mock import MockIdentityProvider
 
 migrations_engine = create_engine(settings.database_url_migrations)
@@ -481,6 +482,70 @@ def main() -> int:
         "tenant A sees its own cases for the second customer",
         len(rows_a_cases_c2) == 1 and rows_a_cases_c2[0].id == high_case_id,
         f"saw {len(rows_a_cases_c2)}",
+    )
+
+    # 34. Regulatory reporting: attempting to generate a report for a case
+    # that is not yet resolved+confirmed is rejected. match_cases[0] (the
+    # sanctions-triggered case from step 26) is still status=="open" here.
+    match_case_id = match_cases[0].id
+    report_gate_rejected = False
+    try:
+        with tenant_session_cm(tenant_a) as db_a32:
+            open_case = case_service.get_case(db_a32, match_case_id)
+            report_service.generate_report(db_a32, tenant_a, open_case, "STR")
+    except ValueError:
+        report_gate_rejected = True
+    check("report generation is rejected for a case not resolved+confirmed", report_gate_rejected)
+
+    # 35. Resolve that case using the mock provider's reserved error-trigger
+    # phrase as the resolution note, then generate a report -- this should
+    # clear the gate but fail at the provider (mock error path).
+    with tenant_session_cm(tenant_a) as db_a33:
+        case_to_resolve = case_service.get_case(db_a33, match_case_id)
+        case_service.update_case_status(
+            db_a33, case_to_resolve,
+            CaseUpdate(status="resolved", resolution="confirmed", resolution_notes="Trigger Regulator Provider Error"),
+        )
+    with tenant_session_cm(tenant_a) as db_a34:
+        resolved_case = case_service.get_case(db_a34, match_case_id)
+        error_report = report_service.generate_report(db_a34, tenant_a, resolved_case, "STR")
+    check(
+        "regulator provider error path",
+        error_report.status == "error" and error_report.provider_reference is None and bool(error_report.error_detail),
+    )
+
+    # 36. Generate a report for high_case_id (resolved/confirmed earlier
+    # with ordinary resolution notes) -- the normal submitted path.
+    with tenant_session_cm(tenant_a) as db_a35:
+        confirmed_case = case_service.get_case(db_a35, high_case_id)
+        submitted_report = report_service.generate_report(db_a35, tenant_a, confirmed_case, "STR")
+        submitted_report_id = submitted_report.id
+    check(
+        "regulator submission succeeds for a resolved+confirmed case",
+        submitted_report.status == "submitted" and submitted_report.provider_reference is not None
+        and submitted_report.payload["case_id"] == str(high_case_id),
+        f"got status={submitted_report.status}",
+    )
+
+    # 37. The submitted report insert was captured in audit_log.
+    with Session(migrations_engine) as db:
+        audit_rows_report = db.execute(
+            select(AuditLog).where(
+                AuditLog.tenant_id == tenant_a, AuditLog.table_name == "reports", AuditLog.record_id == submitted_report_id,
+            )
+        ).scalars().all()
+    check("reports insert was captured in audit_log", len(audit_rows_report) == 1)
+
+    # 38. Cross-tenant isolation applies to reports too.
+    with tenant_session_cm(tenant_b) as db_b6:
+        rows_b_reports = db_b6.execute(select(Report)).scalars().all()
+    check("tenant B sees zero of tenant A's reports", len(rows_b_reports) == 0)
+    with tenant_session_cm(tenant_a) as db_a36:
+        rows_a_reports = db_a36.execute(select(Report).where(Report.case_id == high_case_id)).scalars().all()
+    check(
+        "tenant A sees its own report for the confirmed case",
+        len(rows_a_reports) == 1 and rows_a_reports[0].id == submitted_report_id,
+        f"saw {len(rows_a_reports)}",
     )
 
     print()

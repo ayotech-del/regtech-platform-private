@@ -13,6 +13,7 @@ import app.models.sanctions_screening  # noqa: F401
 import app.models.transaction_alert  # noqa: F401
 import app.models.case  # noqa: F401
 import app.models.case_note  # noqa: F401
+import app.models.report  # noqa: F401
 import app.db.audit  # noqa: F401
 
 config = context.config

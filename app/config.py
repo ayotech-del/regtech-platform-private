@@ -68,5 +68,12 @@ class Settings(BaseSettings):
     # a watchlist hit always warrants review regardless of score.
     case_auto_open_min_severity: str = "medium"  # "low" | "medium" | "high"
 
+    # Regulatory Reporting module. "mock" needs no credentials; a real
+    # regulator integration (NFIU goAML, or another FIU's equivalent
+    # XML/API submission channel) is one new adapter class in
+    # app/services/regulatory/providers/ plus one entry in
+    # app/services/regulatory/factory.py -- nothing else changes.
+    regulator_provider: str = "mock"
+
 
 settings = Settings()
