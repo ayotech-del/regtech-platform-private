@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.transaction import Transaction
 from app.models.transaction_alert import TransactionAlert
 from app.schemas.transaction import TransactionCreate
+from app.services import case_service
 from app.services.monitoring.engine import evaluate_transaction
 
 
@@ -37,6 +38,8 @@ def record_transaction(
     db.flush()
     for alert in alerts:
         db.refresh(alert)
+    for alert in alerts:
+        case_service.open_case_for_transaction_alert(db, tenant_id, customer_id, alert)
     return txn, alerts
 
 

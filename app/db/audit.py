@@ -8,7 +8,8 @@ from typing import Any
 
 from sqlalchemy import BigInteger, CHAR, DateTime, ForeignKey, String, Uuid, event, func, select
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.orm import Mapped, Session, attributes, mapped_column
+from sqlalchemy.orm.base import PassiveFlag
 
 from app.db.base import Auditable, Base
 
@@ -86,10 +87,16 @@ def _diff(obj: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     old: dict[str, Any] = {}
     new: dict[str, Any] = {}
     for col in mapper.columns:
-        state = obj.__class__.__mapper__.class_manager[col.key].impl.get_history(obj, passive=True)
-        if state.added or state.deleted:
-            old[col.key] = state.deleted[0] if state.deleted else None
-            new[col.key] = state.added[0] if state.added else getattr(obj, col.key)
+        # sqlalchemy.orm.attributes.get_history is the public, stable API for
+        # this -- calling the AttributeImpl directly (as this used to) reaches
+        # into an internal method whose signature (state, dict_, passive=...)
+        # isn't the same as the public wrapper's (obj, key, passive=...) and
+        # breaks across SQLAlchemy versions. PASSIVE_NO_FETCH mirrors the
+        # original passive=True intent: never emit extra SQL mid-flush.
+        history = attributes.get_history(obj, col.key, passive=PassiveFlag.PASSIVE_NO_FETCH)
+        if history.added or history.deleted:
+            old[col.key] = history.deleted[0] if history.deleted else None
+            new[col.key] = history.added[0] if history.added else getattr(obj, col.key)
     return old, new
 
 

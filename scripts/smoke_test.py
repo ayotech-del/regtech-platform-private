@@ -18,15 +18,18 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.audit import AuditChainHead, AuditLog, genesis_hash, verify_chain
 from app.db.session import tenant_session_cm
+from app.models.case import Case
+from app.models.case_note import CaseNote
 from app.models.customer import Customer
 from app.models.identity_verification import IdentityVerification
 from app.models.sanctions_screening import SanctionsScreening
 from app.models.tenant import Tenant
 from app.models.transaction_alert import TransactionAlert
+from app.schemas.case import CaseNoteCreate, CaseUpdate
 from app.schemas.identity_verification import IdentityVerificationCreate
 from app.schemas.sanctions_screening import SanctionsScreeningCreate
 from app.schemas.transaction import TransactionCreate
-from app.services import identity_service, sanctions_service, transaction_service
+from app.services import case_service, identity_service, sanctions_service, transaction_service
 from app.services.identity.providers.mock import MockIdentityProvider
 
 migrations_engine = create_engine(settings.database_url_migrations)
@@ -337,6 +340,147 @@ def main() -> int:
         "tenant A sees its own transaction alerts",
         len(rows_a_ta) == 4,  # LARGE_AMOUNT, {LARGE_AMOUNT,ROUND_AMOUNT}, VELOCITY_STRUCTURING
         f"saw {len(rows_a_ta)}",
+    )
+
+    # 26. Case management: the sanctions 'potential_match' from step 15
+    # should have auto-opened a case (unconditional on score); the 'clear'
+    # from step 14 should not have.
+    with tenant_session_cm(tenant_a) as db_a20:
+        match_cases = db_a20.execute(
+            select(Case).where(Case.source_type == "sanctions_screening", Case.source_id == match_id)
+        ).scalars().all()
+        clear_cases = db_a20.execute(
+            select(Case).where(Case.source_type == "sanctions_screening", Case.source_id == clear_rec.id)
+        ).scalars().all()
+    check(
+        "sanctions potential_match auto-opens a case",
+        len(match_cases) == 1 and match_cases[0].priority == "high" and match_cases[0].status == "open"
+        and match_cases[0].customer_id == customer_id,
+        f"got {[(c.priority, c.status) for c in match_cases]}",
+    )
+    check("sanctions clear does not open a case", len(clear_cases) == 0)
+
+    # 27. A second customer, isolated from the trailing-window state the
+    # transaction-monitoring section above already accumulated for
+    # customer_id, so these alert-triggered case scenarios stay clean.
+    with tenant_session_cm(tenant_a) as db_a21:
+        customer2 = Customer(tenant_id=tenant_a, full_name="Chinedu Balogun", email="chinedu@example.com")
+        db_a21.add(customer2)
+    customer2_id = customer2.id
+
+    # 28. A high-severity transaction alert auto-opens a case.
+    with tenant_session_cm(tenant_a) as db_a22:
+        _, high_alerts = transaction_service.record_transaction(
+            db_a22, tenant_a, customer2_id, TransactionCreate(amount=6_123_456.78, currency="NGN"),
+        )
+        high_alert_id = high_alerts[0].id
+    check(
+        "high-severity alert fires alone",
+        [a.rule_code for a in high_alerts] == ["LARGE_AMOUNT"],
+        f"got {[a.rule_code for a in high_alerts]}",
+    )
+    with tenant_session_cm(tenant_a) as db_a23:
+        high_cases = db_a23.execute(
+            select(Case).where(Case.source_type == "transaction_alert", Case.source_id == high_alert_id)
+        ).scalars().all()
+    check(
+        "high-severity transaction alert auto-opens a case",
+        len(high_cases) == 1 and high_cases[0].priority == "high",
+        f"got {[(c.priority, c.status) for c in high_cases]}",
+    )
+    high_case_id = high_cases[0].id
+
+    # 29. A low-severity-only alert (ROUND_AMOUNT alone -- first transaction
+    # for customer2, so velocity can't also fire) must not auto-open a case
+    # (false-positive guard on the severity floor).
+    with tenant_session_cm(tenant_a) as db_a24:
+        _, low_alerts = transaction_service.record_transaction(
+            db_a24, tenant_a, customer2_id, TransactionCreate(amount=2_000_000.00, currency="NGN"),
+        )
+        low_alert_ids = [a.id for a in low_alerts]
+    check(
+        "low-severity round-amount rule fires alone",
+        [a.rule_code for a in low_alerts] == ["ROUND_AMOUNT"],
+        f"got {[a.rule_code for a in low_alerts]}",
+    )
+    with tenant_session_cm(tenant_a) as db_a25:
+        low_cases = db_a25.execute(
+            select(Case).where(Case.source_type == "transaction_alert", Case.source_id.in_(low_alert_ids))
+        ).scalars().all()
+    check("low-severity-only alert does not auto-open a case", len(low_cases) == 0)
+
+    # 30. Case status workflow: open -> in_review -> resolved, with a
+    # required resolution and resolved_at getting stamped.
+    with tenant_session_cm(tenant_a) as db_a26:
+        case = case_service.get_case(db_a26, high_case_id)
+        case = case_service.update_case_status(db_a26, case, CaseUpdate(status="in_review"))
+    check("case transitions open -> in_review", case.status == "in_review" and case.resolved_at is None)
+
+    resolve_rejected = False
+    try:
+        with tenant_session_cm(tenant_a) as db_a27:
+            case = case_service.get_case(db_a27, high_case_id)
+            case_service.update_case_status(db_a27, case, CaseUpdate(status="resolved"))
+    except ValueError:
+        resolve_rejected = True
+    check("resolving without a resolution is rejected", resolve_rejected)
+
+    with tenant_session_cm(tenant_a) as db_a28:
+        case = case_service.get_case(db_a28, high_case_id)
+        case = case_service.update_case_status(
+            db_a28, case,
+            CaseUpdate(status="resolved", resolution="confirmed", resolution_notes="Confirmed large cash-equivalent transfer."),
+        )
+    check(
+        "case resolves with an outcome and resolved_at set",
+        case.status == "resolved" and case.resolution == "confirmed" and case.resolved_at is not None,
+    )
+
+    # 31. A CaseNote can be added and listed.
+    with tenant_session_cm(tenant_a) as db_a29:
+        note = case_service.add_case_note(
+            db_a29, tenant_a, high_case_id,
+            CaseNoteCreate(author="jane.investigator", body="Escalated to compliance lead."),
+        )
+        note_id = note.id
+    with tenant_session_cm(tenant_a) as db_a30:
+        notes = case_service.list_case_notes(db_a30, high_case_id)
+    check(
+        "case note is persisted and listed",
+        len(notes) == 1 and notes[0].id == note_id and notes[0].author == "jane.investigator",
+    )
+
+    # 32. cases/case_notes inserts (and updates) were captured in audit_log:
+    # 1 INSERT (open) + 2 UPDATEs (in_review, resolved) for the case.
+    with Session(migrations_engine) as db:
+        audit_rows_case = db.execute(
+            select(AuditLog).where(
+                AuditLog.tenant_id == tenant_a, AuditLog.table_name == "cases", AuditLog.record_id == high_case_id,
+            )
+        ).scalars().all()
+        audit_rows_note = db.execute(
+            select(AuditLog).where(
+                AuditLog.tenant_id == tenant_a, AuditLog.table_name == "case_notes", AuditLog.record_id == note_id,
+            )
+        ).scalars().all()
+    check(
+        "case insert + status transitions were captured in audit_log",
+        len(audit_rows_case) == 3, f"got {len(audit_rows_case)}",
+    )
+    check("case_notes insert was captured in audit_log", len(audit_rows_note) == 1)
+
+    # 33. Cross-tenant isolation applies to cases and case_notes too.
+    with tenant_session_cm(tenant_b) as db_b5:
+        rows_b_cases = db_b5.execute(select(Case)).scalars().all()
+        rows_b_notes = db_b5.execute(select(CaseNote)).scalars().all()
+    check("tenant B sees zero of tenant A's cases", len(rows_b_cases) == 0)
+    check("tenant B sees zero of tenant A's case notes", len(rows_b_notes) == 0)
+    with tenant_session_cm(tenant_a) as db_a31:
+        rows_a_cases_c2 = db_a31.execute(select(Case).where(Case.customer_id == customer2_id)).scalars().all()
+    check(
+        "tenant A sees its own cases for the second customer",
+        len(rows_a_cases_c2) == 1 and rows_a_cases_c2[0].id == high_case_id,
+        f"saw {len(rows_a_cases_c2)}",
     )
 
     print()

@@ -60,5 +60,13 @@ class Settings(BaseSettings):
     monitoring_round_amount_modulus: float = 100_000.0
     monitoring_round_amount_minimum: float = 1_000_000.0
 
+    # Case Management module. Severity floor below which a transaction alert
+    # does not automatically open a case (still reachable via manual case
+    # creation) -- keeps the review queue from being flooded by weak,
+    # high-false-positive signals like ROUND_AMOUNT on their own. Sanctions
+    # potential_match hits are unconditional -- unlike a rule-engine heuristic,
+    # a watchlist hit always warrants review regardless of score.
+    case_auto_open_min_severity: str = "medium"  # "low" | "medium" | "high"
+
 
 settings = Settings()

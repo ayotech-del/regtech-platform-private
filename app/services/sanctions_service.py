@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.sanctions_screening import SanctionsScreening
 from app.schemas.sanctions_screening import SanctionsScreeningCreate
+from app.services import case_service
 from app.services.watchlist.factory import get_watchlist_provider
 
 
@@ -39,6 +40,7 @@ def create_sanctions_screening(
     db.add(record)
     db.flush()
     db.refresh(record)
+    case_service.open_case_for_sanctions_screening(db, tenant_id, customer_id, record)
     return record
 
 
