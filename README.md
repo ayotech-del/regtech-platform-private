@@ -50,9 +50,12 @@ python -m app.cli create-tenant "Example Bank" example-bank
 # Verify a tenant's audit chain (prints the tenant id from create-tenant above)
 python -m app.cli verify-chain <tenant-id>
 
+# Create an API key for that tenant -- printed once, not retrievable again
+python -m app.cli create-api-key example-bank "smoke-test"
+
 # Run the API
 uvicorn app.main:app --reload
-# then, e.g.: curl -H "X-Tenant-Slug: example-bank" http://localhost:8000/customers
+# then, e.g.: curl -H "Authorization: Bearer <printed-key>" http://localhost:8000/customers
 ```
 
 ## Verification
@@ -76,9 +79,10 @@ doubles as a regression test for later changes.
 
 ## Scope
 
-This pass is intentionally just the two foundations plus enough scaffolding
-to prove them (two example tables: `customers`, `transactions`). Not
-included yet, by design: identity/KYC, transaction monitoring, sanctions
-screening, case management, regulatory reporting, real auth (see the stub
-and comment in `app/api/deps.py:get_current_tenant`), and read-path
-auditing (only mutations are audited in v1).
+Beyond the foundational layer (multi-tenancy + audit log), the platform now
+includes: identity/KYC verification, sanctions/watchlist screening,
+transaction monitoring, case management, regulatory reporting, and API-key
+auth (`app/api/deps.py:get_current_tenant`, `app/services/api_key_service.py`).
+
+Not included yet, by design: read-path auditing (only mutations are audited
+in v1) and a UI (this is an API-only platform).

@@ -12,9 +12,11 @@ import json
 import sys
 import uuid
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_tenant
 from app.config import settings
 from app.db.audit import AuditChainHead, AuditLog, genesis_hash, verify_chain
 from app.db.session import tenant_session_cm
@@ -30,7 +32,14 @@ from app.schemas.case import CaseNoteCreate, CaseUpdate
 from app.schemas.identity_verification import IdentityVerificationCreate
 from app.schemas.sanctions_screening import SanctionsScreeningCreate
 from app.schemas.transaction import TransactionCreate
-from app.services import case_service, identity_service, report_service, sanctions_service, transaction_service
+from app.services import (
+    api_key_service,
+    case_service,
+    identity_service,
+    report_service,
+    sanctions_service,
+    transaction_service,
+)
 from app.services.identity.providers.mock import MockIdentityProvider
 
 migrations_engine = create_engine(settings.database_url_migrations)
@@ -546,6 +555,78 @@ def main() -> int:
         "tenant A sees its own report for the confirmed case",
         len(rows_a_reports) == 1 and rows_a_reports[0].id == submitted_report_id,
         f"saw {len(rows_a_reports)}",
+    )
+
+    # 39. API key auth: create a key for tenant A (root-level table, no RLS
+    # -- same provisioning shape as provision_tenant() above).
+    with Session(migrations_engine) as db:
+        api_key_record, raw_key = api_key_service.create_api_key(db, tenant_a, "smoke-test-key")
+        db.commit()
+        api_key_id = api_key_record.id
+    check(
+        "created API key has correct last4 and stores only a hash, not the raw key",
+        raw_key.endswith(api_key_record.key_last4)
+        and api_key_record.key_hash != raw_key and len(api_key_record.key_hash) == 64,
+    )
+
+    # 40. authenticate() resolves the real key to the right tenant; a
+    # garbage string resolves to nothing.
+    with Session(migrations_engine) as db:
+        authed = api_key_service.authenticate(db, raw_key)
+        bogus = api_key_service.authenticate(db, "rtk_not-a-real-key")
+    check("authenticate resolves a valid key to its tenant", authed is not None and authed.tenant_id == tenant_a)
+    check("authenticate rejects a bogus key", bogus is None)
+
+    # 41. get_current_tenant is the actual FastAPI dependency -- calling it
+    # directly with an explicit `authorization` kwarg is exactly what
+    # FastAPI does under the hood, just without the HTTP round trip. Proves
+    # actor_id/actor_type now flow from the key instead of always None/"user".
+    ctx = get_current_tenant(authorization=f"Bearer {raw_key}")
+    check(
+        "get_current_tenant resolves tenant + actor from a valid key",
+        ctx.tenant_id == tenant_a and ctx.actor_id == api_key_id and ctx.actor_type == "api_key",
+    )
+
+    # 42. get_current_tenant rejects missing/malformed headers and unknown keys.
+    def _rejects_with_401(**kwargs) -> bool:
+        try:
+            get_current_tenant(**kwargs)
+        except HTTPException as exc:
+            return exc.status_code == 401
+        return False
+
+    check(
+        "get_current_tenant rejects a malformed Authorization header",
+        _rejects_with_401(authorization="not-bearer-at-all"),
+    )
+    check(
+        "get_current_tenant rejects an unknown key",
+        _rejects_with_401(authorization="Bearer rtk_totally-made-up"),
+    )
+
+    # 43. Revoking a key blocks both authenticate() and get_current_tenant.
+    with Session(migrations_engine) as db:
+        api_key_service.revoke_api_key(db, api_key_id)
+        db.commit()
+    with Session(migrations_engine) as db:
+        revoked_lookup = api_key_service.authenticate(db, raw_key)
+    check("authenticate rejects a revoked key", revoked_lookup is None)
+    check(
+        "get_current_tenant rejects a revoked key",
+        _rejects_with_401(authorization=f"Bearer {raw_key}"),
+    )
+
+    # 44. Cross-tenant key isolation: a tenant B key must not authenticate
+    # as tenant A.
+    with Session(migrations_engine) as db:
+        _, tenant_b_raw_key = api_key_service.create_api_key(db, tenant_b, "tenant-b-key")
+        db.commit()
+    with Session(migrations_engine) as db:
+        tenant_b_authed = api_key_service.authenticate(db, tenant_b_raw_key)
+    check(
+        "a tenant B key authenticates as tenant B, not tenant A",
+        tenant_b_authed is not None and tenant_b_authed.tenant_id == tenant_b
+        and tenant_b_authed.tenant_id != tenant_a,
     )
 
     print()
