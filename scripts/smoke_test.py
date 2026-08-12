@@ -22,9 +22,11 @@ from app.models.customer import Customer
 from app.models.identity_verification import IdentityVerification
 from app.models.sanctions_screening import SanctionsScreening
 from app.models.tenant import Tenant
+from app.models.transaction_alert import TransactionAlert
 from app.schemas.identity_verification import IdentityVerificationCreate
 from app.schemas.sanctions_screening import SanctionsScreeningCreate
-from app.services import identity_service, sanctions_service
+from app.schemas.transaction import TransactionCreate
+from app.services import identity_service, sanctions_service, transaction_service
 from app.services.identity.providers.mock import MockIdentityProvider
 
 migrations_engine = create_engine(settings.database_url_migrations)
@@ -247,6 +249,95 @@ def main() -> int:
     with tenant_session_cm(tenant_a) as db_a11:
         rows_a_ss = db_a11.execute(select(SanctionsScreening)).scalars().all()
     check("tenant A sees its own sanctions screenings", len(rows_a_ss) == 3)
+
+    # 19. Transaction monitoring: an unremarkable transaction should not
+    # trigger any rule.
+    with tenant_session_cm(tenant_a) as db_a12:
+        _, quiet_alerts = transaction_service.record_transaction(
+            db_a12, tenant_a, customer_id, TransactionCreate(amount=123_456.78, currency="NGN"),
+        )
+    check("ordinary transaction triggers no monitoring alerts", quiet_alerts == [])
+
+    # 20. Large-amount rule fires alone on a non-round amount above threshold.
+    with tenant_session_cm(tenant_a) as db_a13:
+        _, large_alerts = transaction_service.record_transaction(
+            db_a13, tenant_a, customer_id, TransactionCreate(amount=5_432_109.33, currency="NGN"),
+        )
+    check(
+        "large-amount rule fires alone above threshold",
+        [a.rule_code for a in large_alerts] == ["LARGE_AMOUNT"],
+        f"got {[a.rule_code for a in large_alerts]}",
+    )
+
+    # 21. Large-amount + round-amount both fire on one transaction that
+    # clears both thresholds (proves multi-alert-per-transaction).
+    with tenant_session_cm(tenant_a) as db_a14:
+        _, round_alerts = transaction_service.record_transaction(
+            db_a14, tenant_a, customer_id, TransactionCreate(amount=5_000_000.00, currency="NGN"),
+        )
+        round_alert_ids = [a.id for a in round_alerts]
+    check(
+        "large + round amount rules both fire on one transaction",
+        {a.rule_code for a in round_alerts} == {"LARGE_AMOUNT", "ROUND_AMOUNT"},
+        f"got {[a.rule_code for a in round_alerts]}",
+    )
+
+    # 22. A round amount below the minimum floor must not fire (false-positive guard).
+    with tenant_session_cm(tenant_a) as db_a15:
+        _, small_round_alerts = transaction_service.record_transaction(
+            db_a15, tenant_a, customer_id, TransactionCreate(amount=200_000.00, currency="NGN"),
+        )
+    check("round amount below the minimum floor does not fire", small_round_alerts == [])
+
+    # 23. Velocity/structuring: three sub-threshold transactions whose
+    # cumulative sum clears the velocity threshold -- only the third call's
+    # alerts should include it (count-floor + amount-threshold guard).
+    structuring_amount = 1_150_050.75
+    with tenant_session_cm(tenant_a) as db_a16:
+        _, v1_alerts = transaction_service.record_transaction(
+            db_a16, tenant_a, customer_id, TransactionCreate(amount=structuring_amount, currency="NGN"),
+        )
+    with tenant_session_cm(tenant_a) as db_a17:
+        _, v2_alerts = transaction_service.record_transaction(
+            db_a17, tenant_a, customer_id, TransactionCreate(amount=structuring_amount, currency="NGN"),
+        )
+    with tenant_session_cm(tenant_a) as db_a18:
+        _, v3_alerts = transaction_service.record_transaction(
+            db_a18, tenant_a, customer_id, TransactionCreate(amount=structuring_amount, currency="NGN"),
+        )
+    check(
+        "velocity/structuring rule does not fire before the count/amount floor is met",
+        "VELOCITY_STRUCTURING" not in [a.rule_code for a in v1_alerts]
+        and "VELOCITY_STRUCTURING" not in [a.rule_code for a in v2_alerts],
+    )
+    check(
+        "velocity/structuring rule fires once the cumulative window clears the threshold",
+        "VELOCITY_STRUCTURING" in [a.rule_code for a in v3_alerts],
+        f"got {[a.rule_code for a in v3_alerts]}",
+    )
+
+    # 24. The transaction_alerts inserts were captured in audit_log.
+    with Session(migrations_engine) as db:
+        audit_rows_ta = db.execute(
+            select(AuditLog).where(
+                AuditLog.tenant_id == tenant_a,
+                AuditLog.table_name == "transaction_alerts",
+                AuditLog.record_id.in_(round_alert_ids),
+            )
+        ).scalars().all()
+    check("transaction_alerts inserts were captured in audit_log", len(audit_rows_ta) == len(round_alert_ids))
+
+    # 25. Cross-tenant isolation applies to transaction_alerts too.
+    with tenant_session_cm(tenant_b) as db_b4:
+        rows_b_ta = db_b4.execute(select(TransactionAlert)).scalars().all()
+    check("tenant B sees zero of tenant A's transaction alerts", len(rows_b_ta) == 0)
+    with tenant_session_cm(tenant_a) as db_a19:
+        rows_a_ta = db_a19.execute(select(TransactionAlert)).scalars().all()
+    check(
+        "tenant A sees its own transaction alerts",
+        len(rows_a_ta) == 4,  # LARGE_AMOUNT, {LARGE_AMOUNT,ROUND_AMOUNT}, VELOCITY_STRUCTURING
+        f"saw {len(rows_a_ta)}",
+    )
 
     print()
     if failures:

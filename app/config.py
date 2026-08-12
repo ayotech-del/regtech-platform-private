@@ -45,5 +45,20 @@ class Settings(BaseSettings):
     # integration to use its own vendor-defined confidence bands instead.
     sanctions_match_threshold: float = 70.0
 
+    # Transaction Monitoring module. Pure in-house rule engine -- no external
+    # provider to swap, unlike identity/sanctions. Defaults below are
+    # illustrative starting points for a mock dataset (NGN-denominated, like
+    # the rest of this app's dev defaults), not calibrated against real
+    # transaction volumes or CBN/NFIU large-transaction/STR thresholds --
+    # override via env var per deployment.
+    monitoring_large_amount_threshold: float = 5_000_000.0
+    monitoring_velocity_window_hours: int = 24
+    monitoring_velocity_amount_threshold: float = 3_000_000.0
+    # Minimum transaction count within the window before this rule can fire --
+    # structuring is inherently about *multiple* transactions, not one.
+    monitoring_velocity_min_transactions: int = 3
+    monitoring_round_amount_modulus: float = 100_000.0
+    monitoring_round_amount_minimum: float = 1_000_000.0
+
 
 settings = Settings()

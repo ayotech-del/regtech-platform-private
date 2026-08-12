@@ -10,6 +10,7 @@ import app.models.customer  # noqa: F401
 import app.models.transaction  # noqa: F401
 import app.models.identity_verification  # noqa: F401
 import app.models.sanctions_screening  # noqa: F401
+import app.models.transaction_alert  # noqa: F401
 import app.db.audit  # noqa: F401
 
 config = context.config
