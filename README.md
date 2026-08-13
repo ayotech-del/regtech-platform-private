@@ -77,12 +77,36 @@ Proves, end-to-end, against a real database:
 All steps must print `PASS`; the script exits non-zero otherwise, so it
 doubles as a regression test for later changes.
 
+## Frontend
+
+`frontend/` is an investigator-facing case dashboard (Vite + React +
+TypeScript) -- the case queue, case detail (including what triggered it:
+the underlying sanctions screening or transaction alert), resolving a case,
+notes, and filing a regulatory report. It's deliberately not a CRUD panel
+for every module: customers, identity checks, sanctions screenings, and
+transactions are typically created by an integrating system, not typed into
+a form by hand, so those stay API-only. See `frontend/README.md` for setup.
+
+It authenticates the same way any other API caller would -- paste an API
+key (from `create-api-key` above) into a connect screen, stored in
+`localStorage` and sent as a normal `Authorization: Bearer` header. No
+separate user/login system exists (or is needed) for this pass.
+
+Run it against a running backend:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
 ## Scope
 
 Beyond the foundational layer (multi-tenancy + audit log), the platform now
 includes: identity/KYC verification, sanctions/watchlist screening,
-transaction monitoring, case management, regulatory reporting, and API-key
-auth (`app/api/deps.py:get_current_tenant`, `app/services/api_key_service.py`).
+transaction monitoring, case management, regulatory reporting, API-key auth
+(`app/api/deps.py:get_current_tenant`, `app/services/api_key_service.py`),
+and an investigator dashboard (`frontend/`).
 
 Not included yet, by design: read-path auditing (only mutations are audited
-in v1) and a UI (this is an API-only platform).
+in v1) and a UI for anything beyond case investigation (customers/identity/
+sanctions/transactions stay API-only, driven by an integrating system).

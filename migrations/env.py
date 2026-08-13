@@ -5,16 +5,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.config import settings
 from app.db.base import Base
-import app.models.tenant  # noqa: F401 -- register models on Base.metadata
-import app.models.customer  # noqa: F401
-import app.models.transaction  # noqa: F401
-import app.models.identity_verification  # noqa: F401
-import app.models.sanctions_screening  # noqa: F401
-import app.models.transaction_alert  # noqa: F401
-import app.models.case  # noqa: F401
-import app.models.case_note  # noqa: F401
-import app.models.report  # noqa: F401
-import app.models.api_key  # noqa: F401
+import app.models  # noqa: F401 -- registers every model on Base.metadata
 import app.db.audit  # noqa: F401
 
 config = context.config

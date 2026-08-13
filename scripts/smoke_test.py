@@ -36,6 +36,7 @@ from app.schemas.transaction import TransactionCreate
 from app.services import (
     api_key_service,
     case_service,
+    customer_service,
     identity_service,
     report_service,
     sanctions_service,
@@ -636,6 +637,15 @@ def main() -> int:
         tenant_b_authed is not None and tenant_b_authed.tenant_id == tenant_b
         and tenant_b_authed.tenant_id != tenant_a,
     )
+
+    # 45. customer_service.get_customer -- the frontend dashboard's
+    # GET /customers/{customer_id} route is a thin wrapper around exactly
+    # this call.
+    with tenant_session_cm(tenant_a) as db_a37:
+        found = customer_service.get_customer(db_a37, customer_id)
+        missing = customer_service.get_customer(db_a37, uuid.uuid4())
+    check("get_customer finds a real customer", found is not None and found.id == customer_id)
+    check("get_customer returns None for an unknown id", missing is None)
 
     print()
     if failures:

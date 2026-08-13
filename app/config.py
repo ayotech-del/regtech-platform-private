@@ -75,5 +75,11 @@ class Settings(BaseSettings):
     # app/services/regulatory/factory.py -- nothing else changes.
     regulator_provider: str = "mock"
 
+    # Frontend dashboard. The Vite dev server (localhost:5173) calling this
+    # API (localhost:8000) is cross-origin by definition -- override via env
+    # (comma-separated or JSON array; pydantic-settings parses either for a
+    # list field) once the dashboard has a real deployed origin.
+    cors_allowed_origins: list[str] = ["http://localhost:5173"]
+
 
 settings = Settings()
